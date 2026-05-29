@@ -1,0 +1,52 @@
+{
+  "version": "1.0.0",
+  "project_root": "E:/ai-tutor",
+  "data_dir": "E:/ai-tutor/data",
+  "mcp_servers": {
+    "overlay": { "port": 9100, "host": "127.0.0.1" },
+    "desktop_control": { "port": 9101, "host": "127.0.0.1" },
+    "browser_control": { "port": 9102, "host": "127.0.0.1" },
+    "vision_fallback": { "port": 9103, "host": "127.0.0.1" },
+    "voice": { "port": 9104, "host": "127.0.0.1" },
+    "lesson_manager": { "port": 9105, "host": "127.0.0.1" }
+  },
+  "chrome": {
+    "debug_port": 9222,
+    "window_width": 1280,
+    "window_height": 900,
+    "window_x": 0,
+    "window_y": 0,
+    "profile_dir": "E:/ai-tutor/data/chrome-profile"
+  },
+  "vision": {
+    "provider": "gemini",
+    "gemini_model": "gemini-1.5-flash",
+    "moondream_model": "moondream"
+  },
+  "voice": {
+    "tts_model": "kokoro",
+    "stt_model": "base",
+    "vad_threshold": 0.5,
+    "sample_rate": 16000,
+    "chunk_duration_ms": 2000,
+    "chunk_overlap_ms": 500
+  },
+  "lesson_manager": {
+    "db_path": "E:/ai-tutor/data/tutor.db",
+    "cache_dir": "E:/ai-tutor/data/cache",
+    "courses_dir": "E:/ai-tutor/data/courses",
+    "students_dir": "E:/ai-tutor/data/students",
+    "searxng_url": "http://localhost:8080"
+  },
+  "models": {
+    "screen_understanding": "gemini-1.5-flash",
+    "answer_evaluation": "claude-haiku-4-5-20251001",
+    "lesson_generation": "claude-sonnet-4-6",
+    "live_qa": "claude-haiku-4-5-20251001"
+  },
+  "token_limits": {
+    "student_model_summary_tokens": 200,
+    "module_script_tokens": 500,
+    "conversation_history_exchanges": 6
+  }
+}

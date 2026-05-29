@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+*.env.local
+
+# Generated data — never commit student data or course content
+data/courses/*/
+data/students/*/
+data/cache/
+data/chrome-profile/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Keep directory placeholders
+!data/courses/.gitkeep
+!data/students/.gitkeep
+
+# Audio cache
+*.wav
+*.mp3
+
+# Temp screenshots
+tutor_screenshots_*/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
+*.suo
+*.user
+
+# Logs
+*.log

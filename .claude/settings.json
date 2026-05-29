@@ -1,0 +1,50 @@
+{
+  "mcpServers": {
+    "desktop-control": {
+      "command": "python",
+      "args": ["E:/ai-tutor/mcp-servers/desktop-control/server.py"],
+      "env": {}
+    },
+    "browser-control": {
+      "command": "python",
+      "args": ["E:/ai-tutor/mcp-servers/browser-control/server.py"],
+      "env": {}
+    },
+    "vision-fallback": {
+      "command": "python",
+      "args": ["E:/ai-tutor/mcp-servers/vision-fallback/server.py"],
+      "env": {
+        "VISION_PROVIDER": "gemini",
+        "GEMINI_API_KEY": ""
+      }
+    },
+    "voice": {
+      "command": "python",
+      "args": ["E:/ai-tutor/mcp-servers/voice/server.py"],
+      "env": {}
+    },
+    "overlay": {
+      "command": "python",
+      "args": ["E:/ai-tutor/mcp-servers/overlay/server.py"],
+      "env": {}
+    },
+    "lesson-manager": {
+      "command": "python",
+      "args": ["E:/ai-tutor/mcp-servers/lesson-manager/server.py"],
+      "env": {
+        "ANTHROPIC_API_KEY": "",
+        "SEARXNG_URL": "http://localhost:8080"
+      }
+    }
+  },
+  "permissions": {
+    "allow": [
+      "mcp__desktop-control__*",
+      "mcp__browser-control__*",
+      "mcp__vision-fallback__*",
+      "mcp__voice__*",
+      "mcp__overlay__*",
+      "mcp__lesson-manager__*"
+    ]
+  }
+}
