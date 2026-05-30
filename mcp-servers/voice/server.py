@@ -5,17 +5,13 @@ import logging
 import queue
 import sys
 import threading
-import numpy as np
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from tts_engine import TTSEngine
-from stt_engine import STTEngine
-from vad_listener import VADListener
-from interrupt_handler import InterruptHandler
-
+# Heavy imports (torch, sounddevice, scipy) are deferred to _background_init()
+# so the MCP stdio handshake completes in <1 second.
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
@@ -27,23 +23,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Component singletons
+# Component singletons (populated by _background_init)
 # ---------------------------------------------------------------------------
 
-tts = TTSEngine()
-stt = STTEngine()
-interrupt_handler = InterruptHandler()
+tts = None
+stt = None
+interrupt_handler = None
+vad = None
 
-
-def on_speech_detected(audio_array: np.ndarray):
-    """Callback fired by VADListener when a complete utterance is captured."""
-    transcript = stt.transcribe_audio(audio_array)
-    if transcript.strip():
-        logger.info(f"Speech detected: {transcript!r}")
-        interrupt_handler.inject_interrupt(transcript)
-
-
-vad = VADListener(speech_callback=on_speech_detected)
+_ready = threading.Event()  # set when all models are loaded
 
 # ---------------------------------------------------------------------------
 # MCP server
@@ -164,7 +152,7 @@ async def call_tool(
     name: str, arguments: dict
 ) -> list[types.TextContent]:
 
-    # Wait for background model loading to finish (usually a few seconds on first call)
+    # Wait for background model loading to finish (first call only)
     if not _ready.is_set():
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: _ready.wait(timeout=60))
@@ -174,7 +162,6 @@ async def call_tool(
         pace = arguments.get("pace", "normal")
         tone = arguments.get("tone", "friendly")
 
-        # Run blocking TTS in a thread so we don't stall the event loop
         loop = asyncio.get_event_loop()
         completed = await loop.run_in_executor(
             None, lambda: tts.speak(text, pace, tone)
@@ -210,19 +197,17 @@ async def call_tool(
         timeout = float(arguments.get("timeout_seconds", 20))
         prompt  = arguments.get("prompt", "").strip()
 
-        # Optionally speak a prompt first
         if prompt:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: tts.speak(prompt))
 
-        # Drain any stale transcripts so we get a fresh one
+        # Drain any stale transcripts
         while True:
             try:
                 interrupt_handler._pending_interrupts.get_nowait()
             except queue.Empty:
                 break
 
-        # Enable VAD, then block until transcript arrives or timeout
         vad.set_enabled(True)
         loop      = asyncio.get_event_loop()
         transcript = await loop.run_in_executor(
@@ -243,7 +228,8 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/health", "/"):
             body = json.dumps(
-                {"status": "ok", "vad_active": vad._listening}
+                {"status": "ok", "ready": _ready.is_set(),
+                 "vad_active": vad._listening if vad else False}
             ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -254,7 +240,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-    def log_message(self, format, *args):  # silence default access log
+    def log_message(self, format, *args):
         pass
 
 
@@ -265,38 +251,57 @@ def _start_health_server():
 
 
 # ---------------------------------------------------------------------------
-# Startup & main
+# Background initialisation (heavy imports + model loading)
 # ---------------------------------------------------------------------------
 
-_ready = threading.Event()  # set when all models are loaded
-
-
 def _background_init():
-    """Load heavy models in a daemon thread so MCP handshake completes first."""
+    """Import heavy modules and load all models. Runs in a daemon thread."""
+    global tts, stt, interrupt_handler, vad
     try:
+        import numpy as np
+        from tts_engine import TTSEngine
+        from stt_engine import STTEngine
+        from vad_listener import VADListener
+        from interrupt_handler import InterruptHandler
+
+        logger.info("Background init: loading models...")
+
+        tts = TTSEngine()
+        stt = STTEngine()
+        interrupt_handler = InterruptHandler()
+
+        def on_speech_detected(audio_array: np.ndarray):
+            transcript = stt.transcribe_audio(audio_array)
+            if transcript.strip():
+                logger.info(f"Speech detected: {transcript!r}")
+                interrupt_handler.inject_interrupt(transcript)
+
+        vad = VADListener(speech_callback=on_speech_detected)
+
         tts.initialize()
         stt.initialize()
         vad.initialize()
         vad.start()
 
         health_thread = threading.Thread(
-            target=_start_health_server,
-            name="health-server",
-            daemon=True,
+            target=_start_health_server, name="health-server", daemon=True
         )
         health_thread.start()
 
         logger.info("Voice server ready.")
     except Exception as exc:
-        logger.error(f"Background init failed: {exc}")
+        logger.error(f"Background init failed: {exc}", exc_info=True)
     finally:
         _ready.set()
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 async def main():
-    # Start heavy init in background so MCP handshake isn't blocked
-    init_thread = threading.Thread(target=_background_init, name="voice-init", daemon=True)
-    init_thread.start()
+    # Start heavy init in background — MCP handshake completes immediately
+    threading.Thread(target=_background_init, name="voice-init", daemon=True).start()
 
     async with stdio_server() as streams:
         await server.run(*streams, server.create_initialization_options())
