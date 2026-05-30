@@ -19,9 +19,8 @@
       }
     },
     "voice": {
-      "command": "python",
-      "args": ["E:/ai-tutor/mcp-servers/voice/server.py"],
-      "env": {}
+      "type": "http",
+      "url": "http://localhost:9103/mcp"
     },
     "overlay": {
       "command": "python",

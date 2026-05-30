@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-import asyncio
-import json
+"""
+Voice MCP server — HTTP/SSE transport on port 9103.
+
+Runs as a persistent process (not spawned per-request), so the slow
+mcp/torch import happens once at startup, not on every Claude Code
+session. Register in settings.json as type:"http", url:"http://localhost:9103/mcp".
+"""
 import logging
 import queue
 import sys
 import threading
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 sys.path.insert(0, str(Path(__file__).parent))
-
-# Heavy imports (torch, sounddevice, scipy) are deferred to _background_init()
-# so the MCP stdio handshake completes in <1 second.
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp import types
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,231 +29,11 @@ stt = None
 interrupt_handler = None
 vad = None
 
-_ready = threading.Event()  # set when all models are loaded
+_ready = threading.Event()
 
-# ---------------------------------------------------------------------------
-# MCP server
-# ---------------------------------------------------------------------------
-
-server = Server("voice")
-
-
-@server.list_tools()
-async def list_tools() -> list[types.Tool]:
-    return [
-        types.Tool(
-            name="speak",
-            description="Synthesise text to speech and play it. Blocks until playback finishes or is interrupted.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "Text to speak."},
-                    "pace": {
-                        "type": "string",
-                        "enum": ["slow", "normal", "fast"],
-                        "default": "normal",
-                        "description": "Speaking pace.",
-                    },
-                    "tone": {
-                        "type": "string",
-                        "enum": ["friendly", "formal", "excited"],
-                        "default": "friendly",
-                        "description": "Speaking tone.",
-                    },
-                },
-                "required": ["text"],
-            },
-        ),
-        types.Tool(
-            name="speak_async",
-            description="Start TTS playback without blocking. Returns the path to the cached audio file.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "Text to speak."},
-                },
-                "required": ["text"],
-            },
-        ),
-        types.Tool(
-            name="set_listening",
-            description="Enable or disable the microphone VAD listener.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "enabled": {
-                        "type": "boolean",
-                        "default": True,
-                        "description": "True to enable listening, False to disable.",
-                    },
-                },
-            },
-        ),
-        types.Tool(
-            name="get_speech_transcript",
-            description="Retrieve the next pending speech transcript captured by the VAD listener. Returns empty string if none available.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        types.Tool(
-            name="play_audio_file",
-            description="Play a pre-cached audio file by path. Blocks until playback finishes or is interrupted.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path to the WAV audio file.",
-                    },
-                },
-                "required": ["path"],
-            },
-        ),
-        types.Tool(
-            name="listen",
-            description=(
-                "Block until the user finishes speaking, then return their transcript. "
-                "Optionally speak a prompt first. Use this for back-and-forth conversation: "
-                "call speak() then listen() in sequence. Returns empty string on timeout."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "timeout_seconds": {
-                        "type": "number",
-                        "default": 20,
-                        "description": "Max seconds to wait for speech before returning empty string.",
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "default": "",
-                        "description": "If non-empty, speak this text before listening.",
-                    },
-                },
-            },
-        ),
-    ]
-
-
-def _blocking_listen(timeout_seconds: float) -> str:
-    """Block until a speech transcript arrives in the queue, or timeout."""
-    try:
-        return interrupt_handler._pending_interrupts.get(timeout=timeout_seconds)
-    except queue.Empty:
-        return ""
-
-
-@server.call_tool()
-async def call_tool(
-    name: str, arguments: dict
-) -> list[types.TextContent]:
-
-    # Wait for background model loading to finish (first call only)
-    if not _ready.is_set():
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: _ready.wait(timeout=60))
-
-    if name == "speak":
-        text = arguments["text"]
-        pace = arguments.get("pace", "normal")
-        tone = arguments.get("tone", "friendly")
-
-        loop = asyncio.get_event_loop()
-        completed = await loop.run_in_executor(
-            None, lambda: tts.speak(text, pace, tone)
-        )
-        result = "spoken" if completed else "interrupted"
-        return [types.TextContent(type="text", text=result)]
-
-    elif name == "speak_async":
-        text = arguments["text"]
-        audio_path = tts.speak_async(text)
-        return [types.TextContent(type="text", text=audio_path)]
-
-    elif name == "set_listening":
-        enabled = arguments.get("enabled", True)
-        vad.set_enabled(enabled)
-        status = f"VAD listening {'enabled' if enabled else 'disabled'}."
-        return [types.TextContent(type="text", text=status)]
-
-    elif name == "get_speech_transcript":
-        transcript = interrupt_handler.get_pending_transcript()
-        return [types.TextContent(type="text", text=transcript or "")]
-
-    elif name == "play_audio_file":
-        path = arguments["path"]
-        loop = asyncio.get_event_loop()
-        completed = await loop.run_in_executor(
-            None, lambda: tts.play_audio_file(path)
-        )
-        result = "played" if completed else "interrupted"
-        return [types.TextContent(type="text", text=result)]
-
-    elif name == "listen":
-        timeout = float(arguments.get("timeout_seconds", 20))
-        prompt  = arguments.get("prompt", "").strip()
-
-        if prompt:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: tts.speak(prompt))
-
-        # Drain any stale transcripts
-        while True:
-            try:
-                interrupt_handler._pending_interrupts.get_nowait()
-            except queue.Empty:
-                break
-
-        vad.set_enabled(True)
-        loop      = asyncio.get_event_loop()
-        transcript = await loop.run_in_executor(
-            None,
-            lambda: _blocking_listen(timeout),
-        )
-        return [types.TextContent(type="text", text=transcript)]
-
-    else:
-        raise ValueError(f"Unknown tool: {name!r}")
-
-
-# ---------------------------------------------------------------------------
-# Health HTTP server (port 9104)
-# ---------------------------------------------------------------------------
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ("/health", "/"):
-            body = json.dumps(
-                {"status": "ok", "ready": _ready.is_set(),
-                 "vad_active": vad._listening if vad else False}
-            ).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, format, *args):
-        pass
-
-
-def _start_health_server():
-    httpd = HTTPServer(("0.0.0.0", 9104), HealthHandler)
-    logger.info("Health server listening on port 9104.")
-    httpd.serve_forever()
-
-
-# ---------------------------------------------------------------------------
-# Background initialisation (heavy imports + model loading)
-# ---------------------------------------------------------------------------
 
 def _background_init():
-    """Import heavy modules and load all models. Runs in a daemon thread."""
+    """Import heavy modules and load all models in a daemon thread."""
     global tts, stt, interrupt_handler, vad
     try:
         import numpy as np
@@ -283,11 +61,6 @@ def _background_init():
         vad.initialize()
         vad.start()
 
-        health_thread = threading.Thread(
-            target=_start_health_server, name="health-server", daemon=True
-        )
-        health_thread.start()
-
         logger.info("Voice server ready.")
     except Exception as exc:
         logger.error(f"Background init failed: {exc}", exc_info=True)
@@ -295,17 +68,101 @@ def _background_init():
         _ready.set()
 
 
+def _wait_ready():
+    """Block until models are loaded (called inside tool handlers)."""
+    if not _ready.is_set():
+        logger.info("Waiting for models to finish loading...")
+        _ready.wait(timeout=120)
+
+
+# ---------------------------------------------------------------------------
+# FastMCP server
+# ---------------------------------------------------------------------------
+
+from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+mcp = FastMCP("voice", host="0.0.0.0", port=9103)
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({
+        "status": "ok",
+        "ready": _ready.is_set(),
+        "vad_active": bool(vad and vad._listening),
+    })
+
+
+@mcp.tool()
+def speak(text: str, pace: str = "normal", tone: str = "friendly") -> str:
+    """Synthesise text to speech and play it. Blocks until playback finishes or is interrupted."""
+    _wait_ready()
+    completed = tts.speak(text, pace, tone)
+    return "spoken" if completed else "interrupted"
+
+
+@mcp.tool()
+def speak_async(text: str) -> str:
+    """Start TTS playback without blocking. Returns the path to the cached audio file."""
+    _wait_ready()
+    return tts.speak_async(text)
+
+
+@mcp.tool()
+def set_listening(enabled: bool = True) -> str:
+    """Enable or disable the microphone VAD listener."""
+    _wait_ready()
+    vad.set_enabled(enabled)
+    return f"VAD listening {'enabled' if enabled else 'disabled'}."
+
+
+@mcp.tool()
+def get_speech_transcript() -> str:
+    """Retrieve the next pending speech transcript. Returns empty string if none available."""
+    _wait_ready()
+    return interrupt_handler.get_pending_transcript() or ""
+
+
+@mcp.tool()
+def play_audio_file(path: str) -> str:
+    """Play a pre-cached WAV file by path. Blocks until playback finishes or is interrupted."""
+    _wait_ready()
+    completed = tts.play_audio_file(path)
+    return "played" if completed else "interrupted"
+
+
+@mcp.tool()
+def listen(timeout_seconds: float = 20, prompt: str = "") -> str:
+    """
+    Block until the user finishes speaking, then return their transcript.
+    Optionally speak a prompt first. Returns empty string on timeout.
+    """
+    _wait_ready()
+
+    if prompt.strip():
+        tts.speak(prompt.strip())
+
+    # Drain stale transcripts
+    while True:
+        try:
+            interrupt_handler._pending_interrupts.get_nowait()
+        except queue.Empty:
+            break
+
+    vad.set_enabled(True)
+    try:
+        return interrupt_handler._pending_interrupts.get(timeout=timeout_seconds)
+    except queue.Empty:
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-async def main():
-    # Start heavy init in background — MCP handshake completes immediately
-    threading.Thread(target=_background_init, name="voice-init", daemon=True).start()
-
-    async with stdio_server() as streams:
-        await server.run(*streams, server.create_initialization_options())
-
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    threading.Thread(target=_background_init, name="voice-init", daemon=True).start()
+    logger.info("Voice MCP HTTP server starting on port 9103...")
+    mcp.run(transport="streamable-http")
