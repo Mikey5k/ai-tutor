@@ -29,7 +29,9 @@ stt = None
 interrupt_handler = None
 vad = None
 
-_ready = threading.Event()
+_ready       = threading.Event()
+_speaking    = False   # True while TTS is playing
+_mic_enabled = True    # tracks last set_listening call
 
 
 def _background_init():
@@ -91,15 +93,33 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({
         "status": "ok",
         "ready": _ready.is_set(),
+        "speaking": _speaking,
         "vad_active": bool(vad and vad._listening),
+        "mic_enabled": _mic_enabled,
     })
+
+
+@mcp.custom_route("/set_listening", methods=["GET"])
+async def set_listening_http(request: Request) -> JSONResponse:
+    """HTTP control endpoint for the status widget mic toggle."""
+    global _mic_enabled
+    enabled = request.query_params.get("enabled", "true").lower() != "false"
+    _mic_enabled = enabled
+    if vad:
+        vad.set_enabled(enabled)
+    return JSONResponse({"mic_enabled": _mic_enabled})
 
 
 @mcp.tool()
 def speak(text: str, pace: str = "normal", tone: str = "friendly") -> str:
     """Synthesise text to speech and play it. Blocks until playback finishes or is interrupted."""
+    global _speaking
     _wait_ready()
-    completed = tts.speak(text, pace, tone)
+    _speaking = True
+    try:
+        completed = tts.speak(text, pace, tone)
+    finally:
+        _speaking = False
     return "spoken" if completed else "interrupted"
 
 
@@ -113,7 +133,9 @@ def speak_async(text: str) -> str:
 @mcp.tool()
 def set_listening(enabled: bool = True) -> str:
     """Enable or disable the microphone VAD listener."""
+    global _mic_enabled
     _wait_ready()
+    _mic_enabled = enabled
     vad.set_enabled(enabled)
     return f"VAD listening {'enabled' if enabled else 'disabled'}."
 
@@ -128,8 +150,13 @@ def get_speech_transcript() -> str:
 @mcp.tool()
 def play_audio_file(path: str) -> str:
     """Play a pre-cached WAV file by path. Blocks until playback finishes or is interrupted."""
+    global _speaking
     _wait_ready()
-    completed = tts.play_audio_file(path)
+    _speaking = True
+    try:
+        completed = tts.play_audio_file(path)
+    finally:
+        _speaking = False
     return "played" if completed else "interrupted"
 
 
@@ -139,10 +166,15 @@ def listen(timeout_seconds: float = 20, prompt: str = "") -> str:
     Block until the user finishes speaking, then return their transcript.
     Optionally speak a prompt first. Returns empty string on timeout.
     """
+    global _speaking, _mic_enabled
     _wait_ready()
 
     if prompt.strip():
-        tts.speak(prompt.strip())
+        _speaking = True
+        try:
+            tts.speak(prompt.strip())
+        finally:
+            _speaking = False
 
     # Drain stale transcripts
     while True:
@@ -151,6 +183,7 @@ def listen(timeout_seconds: float = 20, prompt: str = "") -> str:
         except queue.Empty:
             break
 
+    _mic_enabled = True
     vad.set_enabled(True)
     try:
         return interrupt_handler._pending_interrupts.get(timeout=timeout_seconds)
