@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import queue
 import sys
 import threading
 import numpy as np
@@ -124,7 +125,38 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["path"],
             },
         ),
+        types.Tool(
+            name="listen",
+            description=(
+                "Block until the user finishes speaking, then return their transcript. "
+                "Optionally speak a prompt first. Use this for back-and-forth conversation: "
+                "call speak() then listen() in sequence. Returns empty string on timeout."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeout_seconds": {
+                        "type": "number",
+                        "default": 20,
+                        "description": "Max seconds to wait for speech before returning empty string.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "default": "",
+                        "description": "If non-empty, speak this text before listening.",
+                    },
+                },
+            },
+        ),
     ]
+
+
+def _blocking_listen(timeout_seconds: float) -> str:
+    """Block until a speech transcript arrives in the queue, or timeout."""
+    try:
+        return interrupt_handler._pending_interrupts.get(timeout=timeout_seconds)
+    except queue.Empty:
+        return ""
 
 
 @server.call_tool()
@@ -168,6 +200,31 @@ async def call_tool(
         )
         result = "played" if completed else "interrupted"
         return [types.TextContent(type="text", text=result)]
+
+    elif name == "listen":
+        timeout = float(arguments.get("timeout_seconds", 20))
+        prompt  = arguments.get("prompt", "").strip()
+
+        # Optionally speak a prompt first
+        if prompt:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: tts.speak(prompt))
+
+        # Drain any stale transcripts so we get a fresh one
+        while True:
+            try:
+                interrupt_handler._pending_interrupts.get_nowait()
+            except queue.Empty:
+                break
+
+        # Enable VAD, then block until transcript arrives or timeout
+        vad.set_enabled(True)
+        loop      = asyncio.get_event_loop()
+        transcript = await loop.run_in_executor(
+            None,
+            lambda: _blocking_listen(timeout),
+        )
+        return [types.TextContent(type="text", text=transcript)]
 
     else:
         raise ValueError(f"Unknown tool: {name!r}")

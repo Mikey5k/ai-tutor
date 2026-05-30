@@ -14,6 +14,21 @@ CHUNK_DURATION_MS = 30
 CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_DURATION_MS / 1000)
 
 
+def _find_wasapi_in() -> Optional[int]:
+    """Return WASAPI microphone device index, or None to use system default."""
+    try:
+        import sounddevice as sd
+        hostapis = sd.query_hostapis()
+        wh = next((i for i, h in enumerate(hostapis) if "WASAPI" in h["name"]), None)
+        if wh is not None:
+            for i, d in enumerate(sd.query_devices()):
+                if d["hostapi"] == wh and d["max_input_channels"] > 0:
+                    return i
+    except Exception:
+        pass
+    return None
+
+
 class VADListener:
     def __init__(
         self,
@@ -51,6 +66,12 @@ class VADListener:
 
     def start(self):
         """Start listening on microphone in background thread."""
+        self._wasapi_in = _find_wasapi_in()
+        if self._wasapi_in is not None:
+            dev_name = sd.query_devices(self._wasapi_in)["name"]
+            logger.info(f"VAD using WASAPI mic: [{self._wasapi_in}] {dev_name}")
+        else:
+            logger.info("VAD using system default microphone.")
         self._listening = True
         self._thread = threading.Thread(
             target=self._process_loop,
@@ -81,12 +102,14 @@ class VADListener:
             )
             return
 
+        wasapi_in = getattr(self, "_wasapi_in", None)
         try:
             with sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 channels=1,
                 dtype='float32',
                 blocksize=CHUNK_SAMPLES,
+                device=wasapi_in,
             ) as stream:
                 logger.info("Microphone input stream opened.")
                 while self._listening:

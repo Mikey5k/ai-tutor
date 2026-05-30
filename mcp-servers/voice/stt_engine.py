@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class STTEngine:
-    def __init__(self, model_size: str = "base"):
+    def __init__(self, model_size: str = "tiny"):
         self.model_size = model_size
         self._model = None
 
@@ -59,8 +59,9 @@ class STTEngine:
         try:
             segments, info = self._model.transcribe(
                 audio_path,
-                beam_size=5,
+                beam_size=3,
                 language="en",
+                vad_filter=True,
             )
             transcript = " ".join(s.text for s in segments).strip()
             logger.debug(
