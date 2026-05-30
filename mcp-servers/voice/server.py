@@ -6,6 +6,7 @@ Runs as a persistent process (not spawned per-request), so the slow
 mcp/torch import happens once at startup, not on every Claude Code
 session. Register in settings.json as type:"http", url:"http://localhost:9103/mcp".
 """
+import asyncio
 import logging
 import queue
 import sys
@@ -32,6 +33,11 @@ vad = None
 _ready       = threading.Event()
 _speaking    = False   # True while TTS is playing
 _mic_enabled = True    # tracks last set_listening call
+
+_current_pace     = "normal"
+_last_spoken      = ""
+_session_topic    = ""
+_session_progress = 0
 
 
 def _background_init():
@@ -96,6 +102,10 @@ async def health(request: Request) -> JSONResponse:
         "speaking": _speaking,
         "vad_active": bool(vad and vad._listening),
         "mic_enabled": _mic_enabled,
+        "pace": _current_pace,
+        "last_spoken_preview": _last_spoken[:60] if _last_spoken else "",
+        "session_topic": _session_topic,
+        "session_progress": _session_progress,
     })
 
 
@@ -110,11 +120,60 @@ async def set_listening_http(request: Request) -> JSONResponse:
     return JSONResponse({"mic_enabled": _mic_enabled})
 
 
+@mcp.custom_route("/stop", methods=["GET"])
+async def stop_speaking(request: Request) -> JSONResponse:
+    if tts:
+        tts.stop()
+    return JSONResponse({"stopped": True})
+
+@mcp.custom_route("/repeat", methods=["GET"])
+async def repeat_last(request: Request) -> JSONResponse:
+    global _speaking
+    if not _last_spoken:
+        return JSONResponse({"result": "nothing_to_repeat"})
+    if not _ready.is_set():
+        return JSONResponse({"result": "not_ready"})
+    _speaking = True
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: tts.speak(_last_spoken, _current_pace)
+        )
+    finally:
+        _speaking = False
+    return JSONResponse({"result": "spoken"})
+
+@mcp.custom_route("/set_pace", methods=["GET"])
+async def set_pace_route(request: Request) -> JSONResponse:
+    global _current_pace
+    pace = request.query_params.get("pace", "normal")
+    if pace not in ("slow", "normal", "fast"):
+        pace = "normal"
+    _current_pace = pace
+    return JSONResponse({"pace": _current_pace})
+
+@mcp.custom_route("/mic_level", methods=["GET"])
+async def mic_level_route(request: Request) -> JSONResponse:
+    level = float(vad._current_level) if vad and hasattr(vad, "_current_level") else 0.0
+    return JSONResponse({"level": round(level, 3)})
+
+@mcp.custom_route("/set_session", methods=["GET"])
+async def set_session_route(request: Request) -> JSONResponse:
+    global _session_topic, _session_progress
+    _session_topic = request.query_params.get("topic", _session_topic)
+    try:
+        _session_progress = int(request.query_params.get("progress", _session_progress))
+    except ValueError:
+        pass
+    return JSONResponse({"topic": _session_topic, "progress": _session_progress})
+
+
 @mcp.tool()
 def speak(text: str, pace: str = "normal", tone: str = "friendly") -> str:
     """Synthesise text to speech and play it. Blocks until playback finishes or is interrupted."""
-    global _speaking
+    global _speaking, _last_spoken, _current_pace
     _wait_ready()
+    _last_spoken = text
+    _current_pace = pace
     _speaking = True
     try:
         completed = tts.speak(text, pace, tone)

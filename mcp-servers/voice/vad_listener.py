@@ -41,6 +41,7 @@ class VADListener:
         self._utils = None
         self._listening = False
         self._enabled = True
+        self._current_level = 0.0
         self._thread: Optional[threading.Thread] = None
         self._audio_buffer = []
         self._in_speech = False
@@ -171,6 +172,7 @@ class VADListener:
             # confidence may be a tensor scalar or a plain float
             if isinstance(confidence, torch.Tensor):
                 confidence = confidence.item()
+            self._current_level = float(confidence)
             return confidence >= self.threshold
         except Exception as exc:
             logger.debug(f"_is_speech error: {exc}")
