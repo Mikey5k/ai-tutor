@@ -161,7 +161,7 @@ class VoiceStatusWidget:
         wc = win32gui.WNDCLASS()
         wc.lpszClassName = self.CLASS
         wc.lpfnWndProc   = self._wnd_proc
-        wc.hbrBackground = None
+        wc.hbrBackground = gdi32.GetStockObject(NULL_BRUSH)
         wc.hCursor       = win32api.LoadCursor(0, win32con.IDC_ARROW)
         wc.style         = CS_HREDRAW | CS_VREDRAW
         try:
