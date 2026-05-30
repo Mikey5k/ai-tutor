@@ -164,6 +164,11 @@ async def call_tool(
     name: str, arguments: dict
 ) -> list[types.TextContent]:
 
+    # Wait for background model loading to finish (usually a few seconds on first call)
+    if not _ready.is_set():
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: _ready.wait(timeout=60))
+
     if name == "speak":
         text = arguments["text"]
         pace = arguments.get("pace", "normal")
@@ -263,25 +268,36 @@ def _start_health_server():
 # Startup & main
 # ---------------------------------------------------------------------------
 
-async def startup():
-    tts.initialize()
-    stt.initialize()
-    vad.initialize()
-    vad.start()
+_ready = threading.Event()  # set when all models are loaded
 
-    # Start health server in a daemon thread
-    health_thread = threading.Thread(
-        target=_start_health_server,
-        name="health-server",
-        daemon=True,
-    )
-    health_thread.start()
 
-    logger.info("Voice server ready.")
+def _background_init():
+    """Load heavy models in a daemon thread so MCP handshake completes first."""
+    try:
+        tts.initialize()
+        stt.initialize()
+        vad.initialize()
+        vad.start()
+
+        health_thread = threading.Thread(
+            target=_start_health_server,
+            name="health-server",
+            daemon=True,
+        )
+        health_thread.start()
+
+        logger.info("Voice server ready.")
+    except Exception as exc:
+        logger.error(f"Background init failed: {exc}")
+    finally:
+        _ready.set()
 
 
 async def main():
-    await startup()
+    # Start heavy init in background so MCP handshake isn't blocked
+    init_thread = threading.Thread(target=_background_init, name="voice-init", daemon=True)
+    init_thread.start()
+
     async with stdio_server() as streams:
         await server.run(*streams, server.create_initialization_options())
 
